@@ -47,7 +47,7 @@ Server.prototype.createHandlers = function(){
 		t.initialiseGame(state);
 
 		//Send ready state to server
-		t.connection.emit(MESSAGE_TYPE.player_active, true);
+		t.connection.emit(MESSAGE_TYPE.player_active, "1"+t.player.id);
 	});
 
 	t.connection.on(MESSAGE_TYPE.player_added, function(msg){
@@ -65,16 +65,22 @@ Server.prototype.createHandlers = function(){
 
 		if(has(t.game.players, msg)){//remove the old inactive player
 			t.game.players[msg].destroy();
+			console.log("\ninspace :: player_removed "+t.game.players[msg].sid+" msg: "+msg);
 		}else{
 			console.log("\ninspace :: player_removed - ERROR player not found "+msg);
 		}
 	});
 	t.connection.on(MESSAGE_TYPE.player_active, function(msg){
-		var a = msg.substr(0,1)==true;
-		var id = msg.substring(1);
+		var a = msg.substr(0,1)=="1",
+			id = msg.substring(1);
 		if(has(t.game.players,id)){
-			console.log("\ninspace :: player_active - active: %s, id: %s", a, id);
+			console.log("\ninspace :: player_active "+t.game.players[id].sid+" - active: %s, id: %s", a, id);
 			t.game.players[id].setActive(a);
+			if(!a && id == t.player.id){
+				console.warn("inspace :: player_active "+t.player.sid+" - ERROR Self deactivated!");
+				t.clearCanvas();
+				//setTimeout(function(){ location.reload(true); }, 1000);
+			}
 		}else{ console.warn("\ninspace :: player_active - ERROR game_player not found "+msg); return !1; }
 	});
 
@@ -92,7 +98,8 @@ Server.prototype.createHandlers = function(){
 		t.player.setInput(key.dir, Controls.isPressed(k));
 
 		//Send to server
-		var msg=""+ key.dir + (Controls.isPressed(k) ? 1:0);
+		var msg=""+ key.dir + (Controls.isPressed(k) ? 1:0) + t.player.id;
+		//console.log("inspace :: Controls.onChange - "+msg);
 		t.connection.emit(MESSAGE_TYPE.player_input, msg);
 	}, !1);
 };
@@ -116,15 +123,19 @@ Server.prototype.initialiseGame = function(state){
 	this.game.view = [this.localCanvas, this.drawCanvas];
 	this.game.ctx = [this.localCanvas.getContext("2d"), this.drawCanvas.getContext("2d")];
 
-	this.game.ctx[0].clearRect(0, 0, this.game.view[0].width, this.game.view[0].height);
-	this.game.ctx[1].clearRect(0, 0, this.game.view[1].width, this.game.view[1].height);
-	
+	this.clearCanvas();
+
 	if(has(this.game.players, this.player.id)){//Update reference to self
 		this.player = this.game.players[this.player.id];
 		//this.player.setActive(true);
 	}else{
-		console.warn("inspace :: initialiseGame - ERROR Player was not added on the server"); return !1;
+		console.warn("inspace :: initialiseGame "+this.player.sid+" - ERROR Player was not added on the server"); return !1;
 	}
+};
+
+Server.prototype.clearCanvas = function(){
+	this.game.ctx[0].clearRect(0, 0, this.game.view[0].width, this.game.view[0].height);
+	this.game.ctx[1].clearRect(0, 0, this.game.view[1].width, this.game.view[1].height);
 };
 
 function debug(s){ server.debug(s); }
@@ -138,7 +149,6 @@ resizeCanvas = function(){
 	server.drawCanvas.width = window.innerWidth;
 	server.drawCanvas.height = window.innerHeight;
 };
-
 
 var Controls={
 	KEYS:{

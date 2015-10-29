@@ -9,12 +9,13 @@ var _framerate = 60,//run the local game at 16ms/60hz
 	_physics_framerate = 60,
 	_physics_frametime = Math.floor(1000.0/_physics_framerate), //run the server physics at 15ms/65hz
 	b2d,
-	Physics,
 	isServer = (typeof(global)!=="undefined");
 
 if(isServer){
 	_framerate = 22;//on server we run at 45ms/22hz
 	_frametime = Math.floor(1000.0/_framerate);
+	
+	b2d = global.b2d;
 }
 
 (function(){//requestAnimationFrame polyfill by Erik Möller, fixes from Paul Irish and Tino Zijdel
@@ -70,7 +71,8 @@ var PLAYER={
 	scale		:40,
 	size		:{width:123, height:80},
 	wheel		:{x:0.13, y:0.15, width:0.25, height:0.26},
-	colour		:["255,0,30,.5","255,100,0,.5","200,0,190,.5","0,200,30,.5","0,30,250,.5","250,200,0,.6"]//red,orange,purple,green,blue,yellow
+	colour		:["255,0,30,.5","255,100,0,.5","200,0,190,.5","0,200,30,.5","0,30,250,.5","250,200,0,.6"], //red,orange,purple,green,blue,yellow
+	drawThreshold: 4000
 };
 PLAYER.pScale = 1/PLAYER.scale;
 PLAYER.size.hw = PLAYER.size.width/2;
@@ -80,12 +82,13 @@ PLAYER.size.hh = PLAYER.size.height/2;
 /*	The game_core class
 
 This gets created on both server and client. Server creates one for each game that is hosted, and client creates one for itself to play the game. */
-var game_core=function(id, gameType, isServer, state){
+var game_core = function(id, gameType, isServer, state){
 	this.id				= id;
 	this.type			= gameType;
 	this.isServer		= isServer;
 	this.playersMax		= 6;
 	this.playersCount	= 0;
+	this.playersAdded	= 0;
 	this.players		= {};
 	this.active			= !1;
 	this.worldSize		= [1032, 610];
@@ -127,8 +130,8 @@ var game_core=function(id, gameType, isServer, state){
 		this.laststate = {};
 
 		//PHYSICS
-		this.physics = Physics.init();
-		Physics.createWalls({width:this.worldSize[0], height:this.worldSize[1]});
+		this.physics = new Physics();
+		this.physics.createWalls({width:this.worldSize[0], height:this.worldSize[1]});
 	}
 
 	if(this.active){
@@ -174,22 +177,20 @@ game_core.parseString = function(s){
 };
 
 game_core.prototype.addPlayer = function(player){
-	console.log("\t game_core.addPlayer :: "+ player.id);
 	this.players[player.id] = player;
-	this.playersCount++;
 	player.game = this;
+	player.sid = this.playersAdded++;
+	this.playersCount++;
+	console.log("\t game_core.addPlayer :: %s id: %s",player.sid, player.id);
 
-	//PHYSICS
-	//if(player.pos[0] > this.worldSize[0]) player.pos[0] = this.worldSize[0];
-	//if(player.pos[1] > this.worldSize[1]) player.pos[1] = this.worldSize[1];
-	if(this.isServer) player.createPhysics(Physics.world);
+	if(this.isServer) player.createPhysics(this.physics);//PHYSICS
 
 	return player;
 };
 game_core.prototype.removePlayer = function(player){
 	console.log("\t game_core.removePlayer :: "+ player.id);
 	if(has(this.players, player.id)){
-		if(this.isServer) this.players[player.id].destroyPhysics(Physics.world);//PHYSICS
+		if(this.isServer) this.players[player.id].destroyPhysics(this.physics);//PHYSICS
 		this.players[player.id].setActive(false);
 		delete this.players[player.id];
 		this.playersCount--;
@@ -199,7 +200,7 @@ game_core.prototype.removePlayer = function(player){
 
 game_core.prototype.checkActive = function(){
 	var a=false;
-	if(this.playersCount > 0 && has(this,"players")){
+	if(has(this,"players")){
 		for(var p in this.players){if(has(this.players,p)){
 			if(this.players[p].active){
 				a=true;
@@ -271,19 +272,19 @@ game_core.prototype.server_update = function(){//PHYSICS
 			if(this.players[p].active && has(this.players[p],"body")){
 				//get offset world pos
 				pos = this.players[p].body.GetWorldPoint({x:PLAYER.size.hw*PLAYER.pScale, y:PLAYER.size.hh*PLAYER.pScale});
-				
+
 				//catch invalid physics
 				if(isNaN(pos.x) || isNaN(pos.y)){
 					console.error("\t game_core.server_update :: \n\t INVALID " +this.players[p].id);
 					this.players[p].setActive(false);
 					break;
 				}
-				
+
 				//update players vars
 				this.players[p].setPos(pos.x*PLAYER.scale, pos.y*PLAYER.scale)
 					.setAngle(parseFloat(this.players[p].body.GetAngle()))
 					.wheelAngle = this.players[p].fJoint.GetJointAngle();
-				
+
 				//push to server snapshot
 				this.laststate[this.laststate.length] = this.players[p].getPosString();
 			}
@@ -329,8 +330,8 @@ game_core.prototype.client_update = function(){
 };
 
 game_core.prototype.update_physics = function(){//PHYSICS
-	Physics.world.Step(this._pdt, 8, 8);
-	Physics.world.ClearForces();
+	this.physics.world.Step(this._pdt, 8, 8);
+	this.physics.world.ClearForces();
 
 	var p,i;
 	for(i in this.players){if(has(this.players,i)){
@@ -401,6 +402,7 @@ game_core.prototype.broadcast = function(type, msg, id){
 /*	Player functions */
 var game_player = function(id, state){
 	this.id			= id;
+	this.sid		= 0;
 	this.active		= false;
 	this.inputs		= [!1,!1,!1,!1];
 	this.colour		= 0;
@@ -434,6 +436,7 @@ game_player.prototype.getPosString = function(){
 game_player.prototype.getString = function(){
 	var s=[
 		this.getPosString(),
+		this.sid,
 		this.active*1,
 		this.colour,
 		this.inputs[0]*1, this.inputs[1]*1, this.inputs[2]*1, this.inputs[3]*1
@@ -451,9 +454,10 @@ game_player.parseString = function(s){
 		wheelAngle: [s[i++]*1]
 	};
 	if(i<s.length){
-		o.active= s[i++]==1;
-		o.colour= s[i++];
-		o.inputs= [s[i++]==1, s[i++]==1, s[i++]==1, s[i++]==1];
+		o.sid = s[i++];
+		o.active = s[i++]==1;
+		o.colour = s[i++];
+		o.inputs = [s[i++]==1, s[i++]==1, s[i++]==1, s[i++]==1];
 	}
 	return o;
 };
@@ -471,7 +475,7 @@ game_player.prototype.setAngle = function(a){
 	return this;
 };
 game_player.prototype.setColour = function(c){
-	console.log("\t game_player.setColour :: id: "+ this.id +" c: "+ c);
+	console.log("\t game_player.setColour :: "+this.sid+" id: "+ this.id +" c: "+ c);
 	if(isNaN(c)){
 		for(var i=PLAYER.colour.length-1;i>=0;i--){
 			if(c==PLAYER.colour[i]){
@@ -484,38 +488,42 @@ game_player.prototype.setColour = function(c){
 	return this;
 };
 game_player.prototype.setActive = function(a){
-	console.log("\t game_player.setActive :: active: "+a);
+	console.log("\t game_player.setActive :: "+this.sid+" active: "+a);
 	this.active = a;
+
+	//set physics active
 	if(has(this,"body")) this.body.SetActive(a);
 	if(has(this,"rWheel")) this.rWheel.SetActive(a);
 	if(has(this,"fWheel")) this.fWheel.SetActive(a);
+
+	//set game active
 	if(has(this,"game")){
-		this.game.checkActive();	
+		this.game.checkActive();
 		if(has(this,"client")){
 			this.game.broadcast(MESSAGE_TYPE.player_active, (a*1)+this.id);
-			//this.client.emit(MESSAGE_TYPE.server_state_update, this.laststate.join("~"));
 		}
 	}
-	
+
 	return this;
 };
 game_player.prototype.setInput = function(d,a){
-	if(d<0 || d>3){ console.warn("\t game_player.setInput - ERROR Input out of range "+d); return !1; }
+	if(d<0 || d>3){ console.warn("\t game_player.setInput :: "+this.sid+" ERROR Input out of range "+d); return !1; }
 	//console.log("\t game_player.setInput - "+ d + (a*1) +" "+ this.id);
 
 	this.inputs[d] = a==true;
 	return this;
 };
 
-game_player.prototype.createPhysics = function(world){//PHYSICS
-	var s = PLAYER.pScale,
+game_player.prototype.createPhysics = function(physics){//PHYSICS
+	var world = physics.world,
+		s = PLAYER.pScale,
 		w = PLAYER.wheel,
 		ps = { width: PLAYER.size.width*s, height: PLAYER.size.height*s, hw:PLAYER.size.width*s/2, hh:PLAYER.size.height*s/2 },
-		fixDef = Physics.fixDef;
+		fixDef = physics.fixDef;
 
 	var safePos = {x:this.pos[0]*s, y:this.pos[1]*s};
-	console.log("\t game_player.createPhysics :: safePos: [%s, %s]], worldSize: [%s, %s]",safePos.x.fixed(8),safePos.y.fixed(8), (this.game.worldSize[0]*s).fixed(8), (this.game.worldSize[1]*s).fixed(8));
-	safePos = Physics.getCleanStart(safePos, {x:this.game.worldSize[0]*s, y:this.game.worldSize[1]*s}, 0);
+	//console.log("\t game_player.createPhysics :: "+this.sid+" safePos: [%s, %s]], worldSize: [%s, %s]",safePos.x.fixed(8),safePos.y.fixed(8), (this.game.worldSize[0]*s).fixed(8), (this.game.worldSize[1]*s).fixed(8));
+	safePos = physics.getCleanStart(safePos, {x:this.game.worldSize[0]*s, y:this.game.worldSize[1]*s}, 0);
 	this.pos[0] = safePos.x / s;
 	this.pos[1] = safePos.y / s;
 
@@ -604,12 +612,13 @@ game_player.prototype.createPhysics = function(world){//PHYSICS
 
 	this.body.SetAngle(this.angle);
 
-	console.log("\t game_player.createPhysics :: created - pos: [%s, %s], angle: %s", this.body.GetPosition().x.fixed(8), this.body.GetPosition().y.fixed(8), parseFloat(this.body.GetAngle()).fixed(8));
+	console.log("\t game_player.createPhysics :: "+this.sid+" created - pos: [%s, %s], angle: %s", this.body.GetPosition().x.fixed(8), this.body.GetPosition().y.fixed(8), parseFloat(this.body.GetAngle()).fixed(8));
 
 	return this;
 };
-game_player.prototype.destroyPhysics = function(world){//PHYSICS
+game_player.prototype.destroyPhysics = function(physics){//PHYSICS
 	if(has(this,"body")){
+		var world = physics.world;
 		world.DestroyJoint(this.rJoint);
 		delete this.rJoint;
 		world.DestroyJoint(this.fJoint);
@@ -636,6 +645,7 @@ game_player.prototype.draw = function(ctx){
 	if(this.active){
 		var c = ctx[0],
 			colour = "rgba("+ (isNaN(this.colour) ? this.colour : PLAYER.colour[this.colour]) +")";
+		
 		c.save();
 		c.translate(this.pos[0], this.pos[1]);
 		c.rotate(this.angle);
@@ -684,13 +694,15 @@ game_player.prototype.draw = function(ctx){
 			dX = newLoc[0]-this.penLoc[0],
 			dY = newLoc[1]-this.penLoc[1],
 			d = dX*dX + dY*dY;
-		if(d<1000){//don't draw if distance squared is greater than 1000
+		if(d<PLAYER.drawThreshold){//don't draw if distance squared is greater than 1000
 			c.beginPath();
 			c.strokeStyle=colour;
 			c.lineWidth=2;
 			c.moveTo(this.penLoc[0], this.penLoc[1]);
 			c.lineTo(newLoc[0], newLoc[1]);
 			c.stroke();
+		}else{
+			console.log("\t game_player.draw :: "+this.sid+" distance squared: "+d);
 		}
 		this.penLoc = newLoc;
 	}
@@ -698,17 +710,8 @@ game_player.prototype.draw = function(ctx){
 };
 
 
-
 /* Physics functions */
-Physics = {
-	world:{},
-	fixDef:{},
-	walls:[],
-};
-Physics.init = function(){
-	//Init Physics on first time
-	if(typeof(b2d) == "undefined") b2d = require("box2dnode");
-
+var Physics = function(){	
 	//Create default fixture
 	this.fixDef = new b2d.b2FixtureDef();
 	this.fixDef.density = PLAYER.density;
@@ -718,11 +721,14 @@ Physics.init = function(){
 	//Create world
 	this.world = new b2d.b2World(
 		new b2d.b2Vec2(0,0), // gravity
-		false // dosleep
+		true // dosleep
 	);
-	return this.world;
+
+	this.walls = [];
+
+	return this;
 };
-Physics.createWalls = function(size){//add walls
+Physics.prototype.createWalls = function(size){//add walls
 	var t=2;
 	for(var def, fix=this.fixDef, i=0; i<4; i++){
 		fix.shape = new b2d.b2PolygonShape();
@@ -738,17 +744,7 @@ Physics.createWalls = function(size){//add walls
 	this.walls[2].SetPosition({x:-t, y:0});
 	this.walls[3].SetPosition({x:size.width*PLAYER.pScale+t, y:0});
 };
-Physics.applyWheelFriction = function(w){
-	var v = w.GetWorldVector({x:0,y:1});
-	v.Multiply(b2d.b2Math.Dot(v, w.GetLinearVelocity()));
-	if(v.Length() > PLAYER.skid){
-		v.Multiply(PLAYER.skid / v.Length());
-	}
-	v.NegativeSelf();
-	w.ApplyImpulse(v, w.GetWorldCenter());
-	return w;
-};
-Physics.getCleanStart = function(p, b, l){
+Physics.prototype.getCleanStart = function(p, b, l){
 	var s = (PLAYER.size.width>PLAYER.size.height ? PLAYER.size.width : PLAYER.size.height) *PLAYER.pScale/2,
 		isSafe = (!isNaN(p.x) && !isNaN(p.y) && p.x>s && p.x<b.x-s && p.y>s && p.y<b.y-s);
 
@@ -773,11 +769,22 @@ Physics.getCleanStart = function(p, b, l){
 		p.x = s + (Math.random() * (b.x-s-s));
 		p.y = s + (Math.random() * (b.y-s-s));
 		if(l<40) //avoid infinite loops
-			p = Physics.getCleanStart(p, b, l+1);
+			p = this.getCleanStart(p, b, l+1);
 		else
 			p = {x:0, y:0};
 	}
 	return p;
+};
+
+Physics.applyWheelFriction = function(w){
+	var v = w.GetWorldVector({x:0,y:1});
+	v.Multiply(b2d.b2Math.Dot(v, w.GetLinearVelocity()));
+	if(v.Length() > PLAYER.skid){
+		v.Multiply(PLAYER.skid / v.Length());
+	}
+	v.NegativeSelf();
+	w.ApplyImpulse(v, w.GetWorldCenter());
+	return w;
 };
 
 
@@ -789,7 +796,8 @@ has = function(o,p){ return Object.prototype.hasOwnProperty.call(o,p); };//Prope
 if(!Object.keys)Object.keys=function(obj){ var keys=[],k;for(k in obj){if(Object.prototype.hasOwnProperty.call(obj,k))keys.push(k);}return keys; };//Support for older browsers
 
 if(isServer){//server side we set these classes to global type
-	module.exports = global.MESSAGE_TYPE = MESSAGE_TYPE;
-	module.exports = global.game_player = game_player;
+	global.PLAYER = PLAYER;
+	global.MESSAGE_TYPE = MESSAGE_TYPE;
+	global.game_player = game_player;
 	module.exports = global.game_core = game_core;
 }

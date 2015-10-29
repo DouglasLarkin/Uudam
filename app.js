@@ -1,13 +1,14 @@
 var
-	cluster = require('cluster'),
+	cluster = require("cluster"),
 	log = true;
 
+/* Master Process */
 if(cluster.isMaster){
 	var
 		workers = process.env.WORKERS || require('os').cpus().length,
 		timeouts = [];
 
-	if(log)console.log('\nCluster :: start cluster with %s available workers', workers);
+	if(log)console.log("\nCluster :: start cluster with %s available workers", workers);
 
 	if(workers>1) workers=1;
 	for(var i=workers-1; i>=0; i--){
@@ -24,10 +25,14 @@ if(cluster.isMaster){
 	cluster.on('exit', function(worker, code, signal){
 		clearTimeout(timeouts[worker.pid]);
 		console.warn('\nCluster :: worker %d died (%s). \n\tRestarting...', worker.process.pid, signal || code);
+
+		//restart child process
 		cluster.fork();
 	});
 }
 
+
+/* Child Proces */
 if(cluster.isWorker){
 	var
 		gameport	= process.env.PORT || 8888,
@@ -39,12 +44,14 @@ if(cluster.isWorker){
 		sio			= require("socket.io").listen(server),
 
 		game_server = { inspace:{count:0}, online:{count:0} };
+		player_list = {};
 
 	global.appRoot = path.dirname(require.main.filename); //path.resolve(__dirname);
 	global.window = global.document = global;
-	game_core = require(global.appRoot + "/game.core.js");
+	
 	if(log)console.log("\nWorker :: Running - process: %s, appRoot: %s", process.cwd(), global.appRoot);
-
+	global.b2d = require("box2dnode");//Init Physics
+	require(global.appRoot + "/game.core.js");
 
 	/*	Express */
 
@@ -69,12 +76,8 @@ if(cluster.isWorker){
 	/*	Socket.IO */
 
 	socketOnConnection = function(client){
+		client.id = UUID.v1();//create ID for client
 		var nsp = client.nsp.name.substring(1);
-
-		//create ID for client
-		client.id = UUID.v1();
-		client.emit(MESSAGE_TYPE.connected_to_server, client.id);
-		if(log)console.log("\nsocket.io :: "+nsp+" connected \n\t\t id: "+ client.id +"\n\t");
 
 		client.on(MESSAGE_TYPE.join_game, function(msg){ game_server.onJoinGame(client, nsp, msg); });
 		client.on(MESSAGE_TYPE.player_active, function(msg){ game_server.onPlayerActive(client, msg); });
@@ -91,10 +94,14 @@ if(cluster.isWorker){
 				client.emit(MESSAGE_TYPE.debug, s+"\n"+m);
 			});
 		}
+		
+		if(log)console.log("\nsocket.io :: "+nsp+" connected - id: "+ client.id);
+		client.emit(MESSAGE_TYPE.connected_to_server, client.id);
 	};
 
 	sio.of("/online").on("connection",socketOnConnection);
 	sio.of("/inspace").on("connection",socketOnConnection);
+
 
 	/* Game Server */
 
@@ -111,7 +118,7 @@ if(cluster.isWorker){
 	/* Handle server inputs */
 
 	game_server.onJoinGame = function(client, gameType, msg){
-		if(log)console.log("\ngame_server.onJoinGame :: \n\t\t id: "+ client.id +"\n\t\t message: "+ msg);
+		if(log)console.log("\ngame_server.onJoinGame :: id: "+client.id+", gameType: "+gameType);
 
 		//Find first available open game
 		var game, foundGame=false, gameList=game_server[gameType];
@@ -130,6 +137,7 @@ if(cluster.isWorker){
 		client.player = new game_player(client.id, game_player.parseString(msg));
 		client.player.client = client;
 		game.addPlayer(client.player);
+		player_list[client.player.id] = client.player;
 
 		client.emit(MESSAGE_TYPE.join_game, game.getString());//Notify client
 		game.broadcast(MESSAGE_TYPE.player_added, client.player.getString(), client.player.id);
@@ -143,12 +151,16 @@ if(cluster.isWorker){
 	};
 
 	game_server.onPlayerActive = function(client, msg){
-		client.player.setActive(msg);
+		var a = msg.substr(0,1)=="1",
+			id = msg.substring(1);
+		if(has(player_list,id)) player_list[id].setActive(a);
+		//client.player.setActive(msg);
 	};
 
-	game_server.onPlayerInput = function(client, input){
-		//console.log("game_server.onPlayerInput :: input:["+ input +"] id:"+ client.id +"");
-		client.player.setInput(input.charAt(0), input.charAt(1));
+	game_server.onPlayerInput = function(client, msg){
+		var id = msg.substring(2);
+		//console.log("game_server.onPlayerInput :: input:["+ msg.substr(0,2) +"] id:"+ id +"");
+		if(has(player_list,id)) player_list[id].setInput(msg.charAt(0), msg.charAt(1));
 	};
 
 	game_server.onDisconnect = function(client){
@@ -156,23 +168,55 @@ if(cluster.isWorker){
 
 		//leave the current game
 		if(has(client,"player") && has(client.player,"game")){
+			if(has(player_list, client.player.id)) delete player_list[client.player.id];
 			client.player.game.broadcast(MESSAGE_TYPE.player_removed, client.id);
 			client.player.destroy();
 			delete client.player;
 		}
-
 		client.emit(MESSAGE_TYPE.disconnected_from_server);
 	};
 }
 
 
-process.on("uncaughtException", function(e){
-	sio.emit(MESSAGE_TYPE.disconnected_from_server);
+/* Process Handling */
 
+process.on("uncaughtException", function(e){
+	//sio.emit(MESSAGE_TYPE.disconnected_from_server);
 	console.error("\nNode :: ERROR - "+ (new Date()).toUTCString() +" uncaughtException:", e.message);
 	console.error(e.stack);
-	process.exit(1);
+
+	gracefulShutdown(function(){
+		process.exit(1);
+	});
 });
+
+process.on('SIGUSR2', function(){
+	console.log("CLOSING [SIGUSR2] NODEMON KILL");	gracefulShutdown(function(){process.kill(process.pid,'SIGUSR2');});
+});
+process.on('SIGHUP',  function(){console.log('CLOSING [SIGHUP]');  gracefulShutdown()});
+process.on('SIGINT',  function(){console.log('CLOSING [SIGINT]');  gracefulShutdown()});
+process.on('SIGQUIT', function(){console.log('CLOSING [SIGQUIT]'); gracefulShutdown()});
+process.on('SIGABRT', function(){console.log('CLOSING [SIGABRT]'); gracefulShutdown()});
+process.on('SIGTERM', function(){console.log('CLOSING [SIGTERM]'); gracefulShutdown()});
+process.on('beforeExit', function(){console.log("CLOSING [beforeExit]");});
+
+var gracefulShutdown = function(callback){
+	console.log("Node :: Received kill signal, shutting down gracefully.");
+	if(typeof callback !== "function") callback = process.exit;
+	if(typeof server !== "undefined"){
+		if(typeof sio !== "undefined") sio.emit(MESSAGE_TYPE.disconnected_from_server);
+		
+		server.close(function(){
+			console.log("Node :: Closed out remaining connections.");
+			callback();
+		});
+		setTimeout(function(){//if after
+			console.error("Node :: Could not close connections in time, forcefully shutting down");
+			callback();
+		}, 3*1000);
+	}else
+		callback();
+};
 
 
 if(!Object.keys)Object.keys=function(obj){ var keys=[],k;for(k in obj){if(Object.prototype.hasOwnProperty.call(obj,k))keys.push(k);}return keys; };//Support for older browsers
