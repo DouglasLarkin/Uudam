@@ -88,7 +88,7 @@ var game_core=function(id, gameType, isServer, state){
 	this.playersCount	= 0;
 	this.players		= {};
 	this.active			= !1;
-	this.worldSize		= [1034, 658];
+	this.worldSize		= [1032, 610];
 
 	this._pdt = 0.0001;					//The physics update delta time
 	this._pdte = new Date().getTime();	//The physics update last delta time
@@ -189,9 +189,7 @@ game_core.prototype.addPlayer = function(player){
 game_core.prototype.removePlayer = function(player){
 	console.log("\t game_core.removePlayer :: "+ player.id);
 	if(has(this.players, player.id)){
-		//PHYSICS
-		if(this.isServer) this.players[player.id].destroyPhysics(Physics.world);
-
+		if(this.isServer) this.players[player.id].destroyPhysics(Physics.world);//PHYSICS
 		this.players[player.id].setActive(false);
 		delete this.players[player.id];
 		this.playersCount--;
@@ -209,12 +207,12 @@ game_core.prototype.checkActive = function(){
 			}
 		}}
 	}
+	console.log("\t game_core.checkActive :: active: "+this.active+", set: "+a);
 	this.active = a;
 
 	if(a){ this.stop_update(); this.start_update(); }
 	else this.stop_update();
 
-	console.log("\t game_core.checkActive :: "+this.active+" "+a);
 	return a;
 };
 
@@ -270,21 +268,31 @@ game_core.prototype.server_update = function(){//PHYSICS
 	];
 	if(this.playersCount>0){
 		for(p in this.players){if(has(this.players,p)){
-			if(has(this.players[p],"body")&&this.players[p].active){
-				//update pos
-				pos = this.players[p].body.GetWorldPoint({x:PLAYER.size.hw*PLAYER.pScale,y:PLAYER.size.hh*PLAYER.pScale});
-				this.players[p].setPos(pos.x*PLAYER.scale, pos.y*PLAYER.scale);
-				this.players[p].angle = this.players[p].body.GetAngle();
-				this.players[p].wheelAngle = this.players[p].fJoint.GetJointAngle();
+			if(this.players[p].active && has(this.players[p],"body")){
+				//get offset world pos
+				pos = this.players[p].body.GetWorldPoint({x:PLAYER.size.hw*PLAYER.pScale, y:PLAYER.size.hh*PLAYER.pScale});
+				
+				//catch invalid physics
+				if(isNaN(pos.x) || isNaN(pos.y)){
+					console.error("\t game_core.server_update :: \n\t INVALID " +this.players[p].id);
+					this.players[p].setActive(false);
+					break;
+				}
+				
+				//update players vars
+				this.players[p].setPos(pos.x*PLAYER.scale, pos.y*PLAYER.scale)
+					.setAngle(parseFloat(this.players[p].body.GetAngle()))
+					.wheelAngle = this.players[p].fJoint.GetJointAngle();
+				
+				//push to server snapshot
+				this.laststate[this.laststate.length] = this.players[p].getPosString();
 			}
-			//push to state
-			this.laststate[this.laststate.length] = this.players[p].getPosString();
 		}}
 	}
 
-	//Send the snapshot to the player
+	//Send the snapshot to the players
 	for(p in this.players){if(has(this.players,p) && has(this.players[p],"client")){
-		this.players[p].client.emit(MESSAGE_TYPE.server_state_update, this.laststate.join("~"));
+		this.players[p].client.volatile.emit(MESSAGE_TYPE.server_state_update, this.laststate.join("~"));
 	}}
 };
 game_core.prototype.client_update = function(){
@@ -294,13 +302,17 @@ game_core.prototype.client_update = function(){
 		for(i=1; i<l; i++){
 			p = game_player.parseString(s[i]);
 			if(p!==false && has(p,"id") && has(this.players,p.id)){
-				//store previous state
-				this.players[p.id].lastPos = this.players[p.id].pos;
-				this.players[p.id].lastAngle = this.players[p.id].angle;
 				//update positions from server
-				for(j in p){if(has(this.players[p.id],j)){
+				this.players[p.id].setPos(p.pos[0], p.pos[1])
+					.setAngle(p.angle)
+					.wheelAngle = p.wheelAngle;
+
+				//this.players[p.id].lastPos = this.players[p.id].pos;
+				//this.players[p.id].lastAngle = this.players[p.id].angle;
+				//update positions from server
+				/*for(j in p){if(has(this.players[p.id],j)){
 					this.players[p.id][j] = p[j];
-				}else{ console.warn("\t game_core.client_update :: ERROR property doesn't exist %o",j); }}
+				}else{ console.warn("\t game_core.client_update :: ERROR property doesn't exist %o",j); }}*/
 			}else{
 				console.warn("\t game_core.client_update :: ERROR Player not found or inactive %o %s %s %s %s",p,p!==false,has(p,"id"),has(this.players,p.id));
 			}
@@ -357,7 +369,7 @@ game_core.prototype.client_onPing = function(msg){
 };*/
 
 game_core.prototype.draw = function(){
-	if(!has(this,"view") || !has(this,"ctx")){ console.warn("\t game_core.draw ::"); return !1; }
+	if(!has(this,"view") || !has(this,"ctx")){ console.warn("\t game_core.draw :: no canvas"); return !1; }
 	//clear canvas
 	this.ctx[0].clearRect(0, 0, this.view[0].width, this.view[0].height);
 
@@ -374,6 +386,16 @@ game_core.prototype.draw = function(){
 	}}
 };
 
+game_core.prototype.broadcast = function(type, msg, id){
+	id = id||0;
+	if(this.playersCount > 0){
+		for(var p in this.players){
+			if(has(this.players,p) && this.players[p].id != id && has(this.players[p],"client")){
+				this.players[p].client.emit(type, msg);
+			}
+		}
+	}
+};
 
 
 /*	Player functions */
@@ -432,16 +454,19 @@ game_player.parseString = function(s){
 		o.active= s[i++]==1;
 		o.colour= s[i++];
 		o.inputs= [s[i++]==1, s[i++]==1, s[i++]==1, s[i++]==1];
-	};
+	}
 	return o;
 };
 
 game_player.prototype.setPos = function(x,y){
+	this.lastPos[0]=this.pos[0];
+	this.lastPos[1]=this.pos[1];
 	this.pos[0]=x;
 	this.pos[1]=y;
 	return this;
 };
 game_player.prototype.setAngle = function(a){
+	this.lastAngle=this.angle;
 	this.angle=a;
 	return this;
 };
@@ -459,14 +484,23 @@ game_player.prototype.setColour = function(c){
 	return this;
 };
 game_player.prototype.setActive = function(a){
-	console.log("\t game_player.setActive :: "+a);
+	console.log("\t game_player.setActive :: active: "+a);
 	this.active = a;
-
-	if(this.getGame()) this.game.checkActive();
+	if(has(this,"body")) this.body.SetActive(a);
+	if(has(this,"rWheel")) this.rWheel.SetActive(a);
+	if(has(this,"fWheel")) this.fWheel.SetActive(a);
+	if(has(this,"game")){
+		this.game.checkActive();	
+		if(has(this,"client")){
+			this.game.broadcast(MESSAGE_TYPE.player_active, (a*1)+this.id);
+			//this.client.emit(MESSAGE_TYPE.server_state_update, this.laststate.join("~"));
+		}
+	}
+	
 	return this;
 };
 game_player.prototype.setInput = function(d,a){
-	if(d<0 || d>3){ console.warn("\tgame_player.setInput - ERROR Input out of range "+d); return !1; }
+	if(d<0 || d>3){ console.warn("\t game_player.setInput - ERROR Input out of range "+d); return !1; }
 	//console.log("\t game_player.setInput - "+ d + (a*1) +" "+ this.id);
 
 	this.inputs[d] = a==true;
@@ -477,11 +511,13 @@ game_player.prototype.createPhysics = function(world){//PHYSICS
 	var s = PLAYER.pScale,
 		w = PLAYER.wheel,
 		ps = { width: PLAYER.size.width*s, height: PLAYER.size.height*s, hw:PLAYER.size.width*s/2, hh:PLAYER.size.height*s/2 },
-		fixDef = Physics.fixDef,
-		safePos = Physics.getCleanStart({x:this.pos[0]*s, y:this.pos[1]*s}, {x:this.game.worldSize[0]*s, y:this.game.worldSize[1]*s});
+		fixDef = Physics.fixDef;
 
-	this.pos[0] = safePos.x/s;
-	this.pos[1] = safePos.y/s;
+	var safePos = {x:this.pos[0]*s, y:this.pos[1]*s};
+	console.log("\t game_player.createPhysics :: safePos: [%s, %s]], worldSize: [%s, %s]",safePos.x.fixed(8),safePos.y.fixed(8), (this.game.worldSize[0]*s).fixed(8), (this.game.worldSize[1]*s).fixed(8));
+	safePos = Physics.getCleanStart(safePos, {x:this.game.worldSize[0]*s, y:this.game.worldSize[1]*s}, 0);
+	this.pos[0] = safePos.x / s;
+	this.pos[1] = safePos.y / s;
 
 	//create body
 	var bodyDef = new b2d.b2BodyDef();
@@ -553,22 +589,22 @@ game_player.prototype.createPhysics = function(world){//PHYSICS
 
 
 	//attach wheels
-	/*var rJointDef = new b2d.b2PrismaticJointDef();
-	rJointDef.Initialize(this.body, this.rWheel, this.rWheel.GetWorldCenter(), this.rWheel.GetWorldCenter());
-	rJointDef.enableLimit = true;
-	rJointDef.lowerTranslation = rJointDef.upperTranslation = 0;
-	this.rJoint = world.CreateJoint(rJointDef);*/
 	var rJointDef = new b2d.b2WeldJointDef();
 	rJointDef.Initialize(this.body, this.rWheel, this.rWheel.GetWorldCenter());
 	this.rJoint = world.CreateJoint(rJointDef);
 
 	var fJointDef = new b2d.b2RevoluteJointDef();
 	fJointDef.Initialize(this.body, this.fWheel, this.fWheel.GetWorldCenter());
+	fJointDef.enableLimit = true;
+	fJointDef.lowerAngle = 0-PLAYER.maxTurn;
+	fJointDef.upperAngle = PLAYER.maxTurn;
 	fJointDef.enableMotor = true;
 	fJointDef.maxMotorTorque = 100;
 	this.fJoint = world.CreateJoint(fJointDef);
 
 	this.body.SetAngle(this.angle);
+
+	console.log("\t game_player.createPhysics :: created - pos: [%s, %s], angle: %s", this.body.GetPosition().x.fixed(8), this.body.GetPosition().y.fixed(8), parseFloat(this.body.GetAngle()).fixed(8));
 
 	return this;
 };
@@ -589,8 +625,8 @@ game_player.prototype.destroyPhysics = function(world){//PHYSICS
 };
 
 game_player.prototype.destroy = function(){
-	if(this.getGame()) this.game.removePlayer(this);
 	if(this.active) this.setActive(false);
+	if(this.getGame()) this.game.removePlayer(this);
 	if(has(this,"client")) delete this.client;
 	if(has(this,"img")) delete this.img;
 	return this;
@@ -648,7 +684,6 @@ game_player.prototype.draw = function(ctx){
 			dX = newLoc[0]-this.penLoc[0],
 			dY = newLoc[1]-this.penLoc[1],
 			d = dX*dX + dY*dY;
-		if(d>250)console.log(d);
 		if(d<1000){//don't draw if distance squared is greater than 1000
 			c.beginPath();
 			c.strokeStyle=colour;
@@ -706,7 +741,6 @@ Physics.createWalls = function(size){//add walls
 Physics.applyWheelFriction = function(w){
 	var v = w.GetWorldVector({x:0,y:1});
 	v.Multiply(b2d.b2Math.Dot(v, w.GetLinearVelocity()));
-	//console.log(v.Length());
 	if(v.Length() > PLAYER.skid){
 		v.Multiply(PLAYER.skid / v.Length());
 	}
@@ -714,27 +748,35 @@ Physics.applyWheelFriction = function(w){
 	w.ApplyImpulse(v, w.GetWorldCenter());
 	return w;
 };
-Physics.getCleanStart = function(p, bounds){
+Physics.getCleanStart = function(p, b, l){
 	var s = (PLAYER.size.width>PLAYER.size.height ? PLAYER.size.width : PLAYER.size.height) *PLAYER.pScale/2,
-		isSafe = (p.x>s && p.x<bounds.x-s && p.y>s && p.y<bounds.y-s);
+		isSafe = (!isNaN(p.x) && !isNaN(p.y) && p.x>s && p.x<b.x-s && p.y>s && p.y<b.y-s);
 
 	if(isSafe){
 		var aabb = new b2d.b2AABB(),
 			callback=function(fixture){
-				console.log("\nPhysics.getCleanStart :: %o",p);
-				isSafe=false;
-				return false;
+				if(!fixture.IsSensor()){
+					var clip = fixture.GetBody().GetPosition();
+					if(!isNaN(clip.x) && !isNaN(clip.y)){
+						console.log("\t\t Physics.getCleanStart :: pos: [%s, %s], clip: [%s, %s]", clip.x.fixed(6), clip.y.fixed(6), p.x.fixed(6), p.y.fixed(6));
+						isSafe = false;
+						return false;
+					}
+				}
+				return true;
 			};
 		aabb.lowerBound.Set(p.x-s, p.y-s);
 		aabb.upperBound.Set(p.x+s, p.y+s);
 		this.world.QueryAABB(callback, aabb);
 	}
 	if(!isSafe){
-		p.x = s + Math.floor(Math.random() * (bounds.x-s-s));
-		p.y = s + Math.floor(Math.random() * (bounds.y-s-s));
-		p = Physics.getCleanStart(p, bounds);
+		p.x = s + (Math.random() * (b.x-s-s));
+		p.y = s + (Math.random() * (b.y-s-s));
+		if(l<40) //avoid infinite loops
+			p = Physics.getCleanStart(p, b, l+1);
+		else
+			p = {x:0, y:0};
 	}
-
 	return p;
 };
 

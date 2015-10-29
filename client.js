@@ -5,8 +5,8 @@ function init(namespace){
 	server = new Server(":8888/"+namespace);
 
 	//Lock canvas size
-	window.addEventListener("resize", debounce(server.resizeCanvas), !1);
-	server.resizeCanvas();
+	window.addEventListener("resize", debounce(resizeCanvas), !1);
+	resizeCanvas();
 
 	//Init controls
 	Controls.init();
@@ -60,20 +60,20 @@ Server.prototype.createHandlers = function(){
 		}
 	});
 	t.connection.on(MESSAGE_TYPE.player_removed, function(msg){
-		var state = game_player.parseString(msg);
-		if(!state || !has(state,"id")){ console.warn("\ninspace :: player_removed - ERROR game_player.parseString failed "+msg); return !1; }
+		//var state = game_player.parseString(msg);
+		//if(!state || !has(state,"id")){ console.warn("\ninspace :: player_removed - ERROR game_player.parseString failed "+msg); return !1; }
 
-		if(has(t.game.players, state.id)){//remove the old inactive player
-			t.game.players[state.id].destroy();
+		if(has(t.game.players, msg)){//remove the old inactive player
+			t.game.players[msg].destroy();
 		}else{
-			console.log("\ninspace :: player_removed - ERROR player not found "+state);
+			console.log("\ninspace :: player_removed - ERROR player not found "+msg);
 		}
 	});
 	t.connection.on(MESSAGE_TYPE.player_active, function(msg){
 		var a = msg.substr(0,1)==true;
 		var id = msg.substring(1);
 		if(has(t.game.players,id)){
-			console.log("\ninspace :: player_active - %s %s", id, a);
+			console.log("\ninspace :: player_active - active: %s, id: %s", a, id);
 			t.game.players[id].setActive(a);
 		}else{ console.warn("\ninspace :: player_active - ERROR game_player not found "+msg); return !1; }
 	});
@@ -100,7 +100,7 @@ Server.prototype.createHandlers = function(){
 Server.prototype.initialisePlayer = function(id, state){
 	var p = new game_player(id, state);
 	if(typeof(state) == "undefined"){
-		p.setPos(Math.random()*this.localCanvas.width, Math.random()*this.localCanvas.height)
+		p.setPos(Math.random()*window.innerWidth, Math.random()*window.innerHeight)
 			.setAngle(Math.random()*360*Math.PI/180);
 		var qs=getQueryString(); //initialise settings from query string
 		if(has(qs,"colour")) p.setColour(qs.colour);
@@ -116,24 +116,28 @@ Server.prototype.initialiseGame = function(state){
 	this.game.view = [this.localCanvas, this.drawCanvas];
 	this.game.ctx = [this.localCanvas.getContext("2d"), this.drawCanvas.getContext("2d")];
 
+	this.game.ctx[0].clearRect(0, 0, this.game.view[0].width, this.game.view[0].height);
+	this.game.ctx[1].clearRect(0, 0, this.game.view[1].width, this.game.view[1].height);
+	
 	if(has(this.game.players, this.player.id)){//Update reference to self
 		this.player = this.game.players[this.player.id];
-		this.player.setActive(true);
+		//this.player.setActive(true);
 	}else{
 		console.warn("inspace :: initialiseGame - ERROR Player was not added on the server"); return !1;
 	}
 };
 
-Server.prototype.resizeCanvas = function(){
-	this.localCanvas.width = window.innerWidth;
-	this.drawCanvas.width = window.innerWidth;
-	this.localCanvas.height = window.innerHeight;
-	this.drawCanvas.height = window.innerHeight;
-	console.log("inspace :: resizeCanvas - [%s, %s]", this.localCanvas.width, this.localCanvas.height);
-};
-
 function debug(s){ server.debug(s); }
 Server.prototype.debug = function(s){ this.connection.emit(MESSAGE_TYPE.debug, s); };
+
+
+resizeCanvas = function(){
+	console.log("inspace :: resizeCanvas - [%s, %s] %o", window.innerWidth, window.innerHeight, this);
+	server.localCanvas.width = window.innerWidth;
+	server.localCanvas.height = window.innerHeight;
+	server.drawCanvas.width = window.innerWidth;
+	server.drawCanvas.height = window.innerHeight;
+};
 
 
 var Controls={
